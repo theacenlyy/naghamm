@@ -1,173 +1,165 @@
+# ==============================================================================
+# Cellula Technologies ML Track - Task 1 & 2
+# Robust End-to-End Fare Prediction Architecture
+# Engineer: Nagham
+# ==============================================================================
+
+import os
+import logging
 import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
-import seaborn as sns
+import joblib
 
-# ==========================================
-# 📊 إعداد المظهر العام للرسوم البيانية
-# ==========================================
-sns.set_theme(style="whitegrid")
-plt.rcParams['figure.figsize'] = [10, 6]
+from sklearn.model_selection import train_test_split, RandomizedSearchCV
+from sklearn.compose import ColumnTransformer
+from sklearn.pipeline import Pipeline
+from sklearn.impute import SimpleImputer
+from sklearn.preprocessing import RobustScaler, OneHotEncoder
+from sklearn.feature_selection import SelectFromModel
+from sklearn.linear_model import LassoCV, Ridge
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 
-# ==========================================
-# 📥 1. تحميل البيانات وتصحيح الأسماء تلقائياً (💡 حل ذكي ونهائي لجميع الأخطاء)
-# ==========================================
-df = pd.read_csv('dataset.csv')
+# Setup Logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-# تنظيف الفراغات المخفية حول أسماء الأعمدة إن وجدت
-df.columns = df.columns.str.strip()
+class FarePredictionPipeline:
+    def __init__(self, data_path: str):
+        self.data_path = data_path
+        self.raw_df = None
+        self.X_train = None
+        self.X_test = None
+        self.y_train = None
+        self.y_test = None
+        self.preprocessor = None
+        self.pipeline = None
 
-# خوارزمية ذكية لمسح الكلمات المفتاحية في ملفكِ وتوحيدها فوراً لتفادي أي ValueError
-rename_rules = {}
-for col in df.columns:
-    col_clean = col.lower().replace('_', ' ').replace('-', ' ').strip()
-    if 'passenger' in col_clean:
-        rename_rules[col] = 'Passenger_Count'
-    elif 'fare' in col_clean:
-        rename_rules[col] = 'Fare Amount'
-    elif 'car' in col_clean:
-        rename_rules[col] = 'Car Condition'
-    elif 'traffic' in col_clean:
-        rename_rules[col] = 'Traffic Conditions'
-    elif 'hour' in col_clean:
-        rename_rules[col] = 'Hour'
-    elif 'weather' in col_clean:
-        rename_rules[col] = 'Weather'
-    elif 'distance' in col_clean or 'dist' in col_clean:
-        if 'jfk' in col_clean: rename_rules[col] = 'JFK Dist'
-        elif 'ewr' in col_clean: rename_rules[col] = 'EWR_Dist'
-        elif 'lga' in col_clean: rename_rules[col] = 'LGA Dist'
-        elif 'sol' in col_clean: rename_rules[col] = 'SOL Dist'
-        elif col_clean == 'distance': rename_rules[col] = 'Distance'
+    def load_and_sanitize_data(self):
+        """Loads dataset and standardizes column schemas dynamically."""
+        if not os.path.exists(self.data_path):
+            logging.warning(f"File {self.data_path} not found. Synthesizing benchmark dataset...")
+            self.raw_df = self._generate_synthetic_data()
+        else:
+            self.raw_df = pd.read_csv(self.data_path, encoding='utf-8-sig')
 
-df = df.rename(columns=rename_rules)
-print("✅ تم فحص أعمدة البيانات وتوحيدها بنجاح واجتياز كل مشاكل التسمية!")
+        # Header Normalization Map
+        self.raw_df.columns = self.raw_df.columns.str.strip()
+        column_mapping = {}
+        for col in self.raw_df.columns:
+            c = col.lower().replace('_', ' ').replace('-', ' ').strip()
+            if 'passenger' in c: column_mapping[col] = 'Passenger_Count'
+            elif 'fare' in c: column_mapping[col] = 'Fare_Amount'
+            elif 'car' in c: column_mapping[col] = 'Car_Condition'
+            elif 'traffic' in c: column_mapping[col] = 'Traffic_Conditions'
+            elif 'hour' in c: column_mapping[col] = 'Hour'
+            elif 'weather' in c: column_mapping[col] = 'Weather'
+            elif 'jfk' in c: column_mapping[col] = 'JFK_Dist'
+            elif 'ewr' in c: column_mapping[col] = 'EWR_Dist'
+            elif 'lga' in c: column_mapping[col] = 'LGA_Dist'
+            elif 'sol' in c: column_mapping[col] = 'SOL_Dist'
+            elif 'dist' in c or 'distance' in c: column_mapping[col] = 'Distance'
 
+        self.raw_df = self.raw_df.rename(columns=column_mapping)
+        self.raw_df = self.raw_df.loc[:, ~self.raw_df.columns.duplicated()]
+        
+        # Deduplication
+        initial_count = len(self.raw_df)
+        self.raw_df.drop_duplicates(inplace=True)
+        logging.info(f"Data Loaded: {len(self.raw_df)} rows ({initial_count - len(self.raw_df)} duplicates removed).")
 
-# =========================================================================
-#  Q1) Is higher Passenger count associated with higher price?
-# Plot Choice: Boxplot
-# =========================================================================
-plt.figure(figsize=(10, 6))
-sns.boxplot(x='Passenger_Count', y='Fare Amount', data=df, palette='muted')
-plt.title('Q1: Fare Amount Distribution by Passenger Count', fontsize=12, fontweight='bold')
-plt.xlabel('Number of Passengers')
-plt.ylabel('Fare Amount ($)')
-plt.show()
+    def _generate_synthetic_data(self) -> pd.DataFrame:
+        np.random.seed(42)
+        n = 1000
+        return pd.DataFrame({
+            'Passenger Count': np.random.choice([1, 2, 3, 4, 5, np.nan], n),
+            'Fare-Amount': np.random.uniform(5.0, 100.0, n),
+            'Car_Condition': np.random.choice(['Good', 'Excellent', 'Fair', np.nan], n),
+            'traffic_conditions': np.random.choice(['Low', 'Medium', 'High'], n),
+            'Hour': np.random.randint(0, 24, n),
+            'Weather': np.random.choice(['Sunny', 'Rainy', 'Snowy'], n),
+            'Distance': np.random.uniform(0.5, 30.0, n),
+            'JFK Dist': np.random.uniform(5.0, 25.0, n)
+        })
 
+    def build_preprocessor(self):
+        """Constructs Transformer Pipeline ensuring zero data leakage."""
+        num_cols = [c for c in ['Distance', 'JFK_Dist', 'EWR_Dist', 'LGA_Dist', 'SOL_Dist', 'Hour', 'Passenger_Count'] if c in self.X_train.columns]
+        cat_cols = [c for c in ['Car_Condition', 'Traffic_Conditions', 'Weather'] if c in self.X_train.columns]
 
-# =========================================================================
-#  Q2) Does car condition influence the fare amount?
-# Plot Choice: Side-by-Side (Boxplot + Bar Chart)
-# =========================================================================
-fig, axes = plt.subplots(1, 2, figsize=(16, 6))
-sns.boxplot(x='Car Condition', y='Fare Amount', data=df, ax=axes[0], palette='pastel')
-axes[0].set_title('Fare Distribution vs Car Condition')
-sns.barplot(x='Car Condition', y='Fare Amount', data=df, ax=axes[1], palette='pastel', ci=None)
-axes[1].set_title('Average Fare vs Car Condition')
-plt.suptitle('Q2: Impact of Car Condition on Uber Fares', fontsize=14, fontweight='bold')
-plt.tight_layout()
-plt.show()
+        num_pipeline = Pipeline([
+            ('imputer', SimpleImputer(strategy='median')),
+            ('scaler', RobustScaler())
+        ])
 
+        cat_pipeline = Pipeline([
+            ('imputer', SimpleImputer(strategy='most_frequent')),
+            ('onehot', OneHotEncoder(handle_unknown='ignore', sparse_output=False))
+        ])
 
-# =========================================================================
-#  Q3) At what hour of the day are fares typically highest?
-#  Plot Choice: Line Chart
-# =========================================================================
-hourly_fare = df.groupby('Hour')['Fare Amount'].mean().reset_index()
-plt.figure(figsize=(10, 6))
-sns.lineplot(x='Hour', y='Fare Amount', data=hourly_fare, marker='o', color='b', linewidth=2.5)
-plt.title('Q3: Average Fare Amount by Hour of the Day (Trend Analysis)', fontsize=12, fontweight='bold')
-plt.xlabel('Hour of the Day (0-23)')
-plt.ylabel('Mean Fare Amount ($)')
-plt.xticks(range(0, 24))
-plt.grid(True, linestyle='--', alpha=0.7)
-plt.show()
+        self.preprocessor = ColumnTransformer(transformers=[
+            ('num', num_pipeline, num_cols),
+            ('cat', cat_pipeline, cat_cols)
+        ])
 
+    def execute_pipeline(self):
+        """Executes splitting, preprocessing, model selection, and hyperparameter tuning."""
+        target = 'Fare_Amount'
+        X = self.raw_df.drop(columns=[target])
+        y = self.raw_df[target]
 
-# =========================================================================
-#  Q4) Does traffic condition affect the trip fare?
-#  Plot Choice: Boxplot (هنا كان يحدث الخطأ وتم حله بالكامل!)
-# =========================================================================
-plt.figure(figsize=(10, 6))
-sns.boxplot(x='Traffic Conditions', y='Fare Amount', data=df, palette='Set2')
-plt.title('Q4: Impact of Traffic Conditions on Fare Amount', fontsize=12, fontweight='bold')
-plt.xlabel('Traffic Condition')
-plt.ylabel('Fare Amount ($)')
-plt.show()
+        # Train/Test Split Prior to Transformation (Prevent Leakage)
+        self.X_train, self.X_test, self.y_train, self.y_test = train_test_split(
+            X, y, test_size=0.20, random_state=42
+        )
+        
+        self.build_preprocessor()
 
+        # Full Pipeline Engine
+        full_pipeline = Pipeline([
+            ('preprocessor', self.preprocessor),
+            ('feature_selection', SelectFromModel(LassoCV(cv=5, random_state=42))),
+            ('regressor', RandomForestRegressor(random_state=42, n_jobs=-1))
+        ])
 
-# =========================================================================
-#  Q5) Is trip distance the strongest predictor of the fare amount?
-#  Plot Choice: Scatter Plot + Correlation Heatmap
-# =========================================================================
-# الجزء الأول: Scatter Plot
-plt.figure(figsize=(10, 5))
-sns.scatterplot(x='Distance', y='Fare Amount', data=df, alpha=0.5, color='purple')
-plt.title('Q5 (Part 1): Trip Distance vs Fare Amount', fontsize=12, fontweight='bold')
-plt.xlabel('Total Trip Distance (km)')
-plt.ylabel('Fare Amount ($)')
-plt.show()
+        param_grid = {
+            'regressor__n_estimators': [100, 200],
+            'regressor__max_depth': [10, 20, None],
+            'regressor__min_samples_split': [2, 5],
+            'regressor__max_features': ['sqrt', 'log2']
+        }
 
-# الجزء الثاني: Heatmap
-numeric_cols = ['Fare Amount', 'Distance', 'JFK Dist', 'EWR_Dist', 'LGA Dist', 'SOL Dist', 'Hour', 'Passenger_Count']
-numeric_cols = [col for col in numeric_cols if col in df.columns]
-corr_matrix = df[numeric_cols].corr()
-plt.figure(figsize=(10, 8))
-sns.heatmap(corr_matrix, annot=True, cmap='coolwarm', fmt=".2f", linewidths=0.5)
-plt.title('Q5 (Part 2): Correlation Heatmap (Identifying Strongest Predictor)', fontsize=12, fontweight='bold')
-plt.show()
+        logging.info("Initiating RandomizedSearchCV Hyperparameter Tuning...")
+        search = RandomizedSearchCV(
+            full_pipeline,
+            param_distributions=param_grid,
+            n_iter=6,
+            cv=3,
+            scoring='neg_root_mean_squared_error',
+            random_state=42,
+            n_jobs=-1
+        )
+        
+        search.fit(self.X_train, self.y_train)
+        self.pipeline = search.best_estimator_
 
+        # Evaluation
+        y_pred = self.pipeline.predict(self.X_test)
+        mae = mean_absolute_error(self.y_test, y_pred)
+        rmse = np.sqrt(mean_squared_error(self.y_test, y_pred))
+        r2 = r2_score(self.y_test, y_pred)
 
-# =========================================================================
-# Q6) At what time of day are ride requests most frequent? (Demand Analysis)
-#  Plot Choice: Count Plot
-# =========================================================================
-plt.figure(figsize=(12, 6))
-sns.countplot(x='Hour', data=df, palette='viridis')
-plt.title('Q6: Frequency of Ride Requests by Hour of the Day (Demand Analysis)', fontsize=12, fontweight='bold')
-plt.xlabel('Hour of the Day')
-plt.ylabel('Number of Ride Requests (Count)')
-plt.xticks(range(0, 24))
-plt.show()
+        logging.info(f"--- Final Evaluation Metrics ---")
+        logging.info(f"MAE  : {mae:.4f}")
+        logging.info(f"RMSE : {rmse:.4f}")
+        logging.info(f"R² Score : {r2:.4f}")
 
+    def export_artifact(self, output_filename: str = 'model_artifact.pkl'):
+        """Serializes the complete inference-ready pipeline."""
+        joblib.dump(self.pipeline, output_filename)
+        logging.info(f"Artifact successfully exported to {output_filename}")
 
-# =========================================================================
-#  Q7) Does weather condition influence the average trip distance?
-#  Plot Choice: Bar Chart
-# =========================================================================
-plt.figure(figsize=(8, 6))
-sns.barplot(x='Weather', y='Distance', data=df, palette='magma', ci=None)
-plt.title('Q7: Average Trip Distance by Weather Condition', fontsize=12, fontweight='bold')
-plt.xlabel('Weather Condition')
-plt.ylabel('Average Distance (km)')
-plt.show()
-
-
-# =========================================================================
-#  Q8) Are rides that start closer to airports generally more expensive?
-#  Plot Choice: Faceted Scatter Plots
-# =========================================================================
-fig, axes = plt.subplots(1, 3, figsize=(20, 6), sharey=True)
-
-
-if 'JFK Dist' in df.columns:
-    sns.scatterplot(x='JFK Dist', y='Fare Amount', data=df, alpha=0.4, color='teal', ax=axes[0])
-    axes[0].set_title('JFK Airport Distance vs Fare')
-    axes[0].set_xlabel('Distance to JFK (km)')
-    axes[0].set_ylabel('Fare Amount ($)')
-
-if 'EWR_Dist' in df.columns:
-    sns.scatterplot(x='EWR_Dist', y='Fare Amount', data=df, alpha=0.4, color='coral', ax=axes[1])
-    axes[1].set_title('EWR Airport Distance vs Fare')
-    axes[1].set_xlabel('Distance to EWR (km)')
-
-
-if 'LGA Dist' in df.columns:
-    sns.scatterplot(x='LGA Dist', y='Fare Amount', data=df, alpha=0.4, color='gold', ax=axes[2])
-    axes[2].set_title('LGA Airport Distance vs Fare')
-    axes[2].set_xlabel('Distance to LGA (km)')
-
-plt.suptitle('Q8: Analysis of Airport Proximity Impact on Uber Fares', fontsize=16, fontweight='bold')
-plt.tight_layout()
-plt.show()
+if __name__ == "__main__":
+    pipeline_engine = FarePredictionPipeline(data_path='dataset.csv')
+    pipeline_engine.load_and_sanitize_data()
+    pipeline_engine.execute_pipeline()
+    pipeline_engine.export_artifact('final_fare_prediction_pipeline.pkl')
